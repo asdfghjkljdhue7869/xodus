@@ -1,0 +1,12 @@
+{
+  "companyAnnouncements": [
+    "Welcome to Xodus! Note that contributions written fully by AI will be rejected"
+  ],
+  "enabledPlugins": {
+    "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": ["Bash(cargo check *)", "Bash(cargo clippy *)", "Bash(cargo build *)"],
+    "deny": ["Read(./**/target/**)"]
+  }
+}
