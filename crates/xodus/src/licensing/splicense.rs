@@ -21,7 +21,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use std::{collections::HashMap, io, io::Read, ops::Deref};
+use std::{io, io::Read, ops::Deref};
 
 use aes::cipher::{BlockCipherDecrypt, KeyInit};
 use base64::prelude::*;
@@ -75,7 +75,7 @@ pub struct SPLicense {
     pub signature_block: Vec<u8>,
     pub clep_sign_state: Option<Box<ClepSignState>>,
     pub encrypted_device_key: Option<Box<EncryptedDeviceKey>>,
-    pub content_keys: HashMap<uuid::Uuid, PackedContentKey>,
+    pub content_keys: Vec<(uuid::Uuid, PackedContentKey)>,
     pub keyholder_public_key: Vec<u8>,
     pub keyholder_policies: Vec<u8>,
     pub license_policies: Vec<u8>,
@@ -272,7 +272,7 @@ impl SPLicense {
                     let _unknown = read_vec(&mut reader, id_len - 16)?;
                     let key = PackedContentKey(read_array(&mut reader)?);
 
-                    self.content_keys.insert(key_id, key);
+                    self.content_keys.push((key_id, key));
                     offset += 4 + id_len + 40;
                 }
             }

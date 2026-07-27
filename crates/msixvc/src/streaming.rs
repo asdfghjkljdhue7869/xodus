@@ -1,3 +1,7 @@
+pub mod decryption;
+pub mod producer;
+pub mod writer;
+
 use std::future::Future;
 use std::io::{Error, ErrorKind, SeekFrom};
 use std::pin::Pin;
