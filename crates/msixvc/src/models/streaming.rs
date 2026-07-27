@@ -1,22 +1,21 @@
 pub enum ProducerTask {
     Download {
-        page_number: usize,
-        number_of_pages: usize,
+        page_number: u64,
+        number_of_pages: u64,
     },
     Retry(ProducerResult),
-    Stop,
 }
 
 pub struct ProducerResult {
-    pub page_number: usize,
-    pub number_of_pages: usize,
-    pub retry_number: usize,
+    pub page_number: u64,
+    pub number_of_pages: u64,
+    pub retry_number: u8,
     pub buffer: Vec<u8>,
 }
 
 pub struct DecryptionResult {
-    pub page_number: usize,
-    pub number_of_pages: usize,
+    pub page_number: u64,
+    pub number_of_pages: u64,
     pub buffer: Vec<u8>,
 }
 

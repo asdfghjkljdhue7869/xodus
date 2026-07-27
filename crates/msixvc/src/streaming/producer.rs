@@ -6,7 +6,7 @@ pub mod network;
 #[async_trait::async_trait]
 pub trait StreamProducer {
     async fn produce(
-        &self,
+        &mut self,
         input: &mut ProducerResult,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     async fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_>;
@@ -16,7 +16,7 @@ pub trait StreamProducer {
     fn send_result(&self, result: ProducerResult) -> Result<(), flume::SendError<ProducerResult>>;
 }
 
-pub async fn run_producer_loop<T>(producer: T, retry_tx: flume::Sender<ProducerResult>)
+pub async fn run_producer_loop<T>(mut producer: T, retry_tx: flume::Sender<ProducerResult>)
 where
     T: StreamProducer,
 {
@@ -33,7 +33,6 @@ where
         };
 
         let mut result = match task {
-            ProducerTask::Stop => break,
             ProducerTask::Retry(mut retry) => {
                 retry.retry_number += 1;
                 retry
@@ -49,8 +48,8 @@ where
                     break;
                 };
                 ProducerResult {
-                    page_number: page_number,
-                    number_of_pages: number_of_pages,
+                    page_number,
+                    number_of_pages,
                     retry_number: 0,
                     buffer: memory,
                 }

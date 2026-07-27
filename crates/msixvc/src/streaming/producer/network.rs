@@ -1,10 +1,14 @@
+use futures_util::StreamExt;
+
 use super::StreamProducer;
 use crate::models::streaming::{ProducerResult, ProducerTask};
 
 /// Pipeline producer from network source
+#[derive(Clone)]
 pub struct NetworkProducer {
     url: String,
     client: reqwest::Client,
+    page_size: usize,
 
     cancellation_token: tokio_util::sync::CancellationToken,
 
@@ -18,6 +22,8 @@ impl NetworkProducer {
     pub fn new(
         client: reqwest::Client,
         url: String,
+        page_size: usize,
+
         cancellation_token: tokio_util::sync::CancellationToken,
         task_pool: flume::Receiver<ProducerTask>,
         task_retry_pool: flume::Receiver<ProducerTask>,
@@ -27,6 +33,7 @@ impl NetworkProducer {
         Self {
             url,
             client,
+            page_size,
             cancellation_token,
             task_pool,
             task_retry_pool,
@@ -54,11 +61,34 @@ impl StreamProducer for NetworkProducer {
         self.result_pool.send(result)
     }
     async fn produce(
-        &self,
+        &mut self,
         input: &mut ProducerResult,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let buffer = &mut input.buffer;
-        todo!("Network producer is unimplemented");
+        let range_start = input.page_number * self.page_size as u64;
+        let size = input.number_of_pages * self.page_size as u64;
+        let range_end = range_start + size;
+
+        let range_header = format!("bytes={range_start}-{range_end}");
+
+        let response = self
+            .client
+            .get(&self.url)
+            .header("Range", range_header)
+            .send()
+            .await?;
+
+        let mut stream = response.bytes_stream();
+        let mut read_total = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let read = chunk.len();
+            buffer[read_total..].copy_from_slice(&chunk);
+            read_total += read;
+        }
+        let difference = read_total.abs_diff(size as usize);
+        buffer[read_total..read_total + difference].fill(0);
+
         Ok(())
     }
 }
