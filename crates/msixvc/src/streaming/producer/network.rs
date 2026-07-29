@@ -1,6 +1,5 @@
 use futures_util::StreamExt;
 
-use super::StreamProducer;
 use crate::models::streaming::{ProducerResult, ProducerTask};
 
 /// Pipeline producer from network source
@@ -8,21 +7,19 @@ use crate::models::streaming::{ProducerResult, ProducerTask};
 pub struct NetworkProducer {
     url: String,
     client: reqwest::Client,
-    page_size: usize,
 
-    cancellation_token: tokio_util::sync::CancellationToken,
+    pub(super) cancellation_token: tokio_util::sync::CancellationToken,
 
-    task_pool: flume::Receiver<ProducerTask>,
-    task_retry_pool: flume::Receiver<ProducerTask>,
-    memory_pool: flume::Receiver<Vec<u8>>,
-    result_pool: flume::Sender<ProducerResult>,
+    pub(super) task_pool: flume::Receiver<ProducerTask>,
+    pub(super) task_retry_pool: flume::Receiver<ProducerTask>,
+    pub(super) memory_pool: flume::Receiver<Vec<u8>>,
+    pub(super) result_pool: flume::Sender<ProducerResult>,
 }
 
 impl NetworkProducer {
     pub fn new(
         client: reqwest::Client,
         url: String,
-        page_size: usize,
 
         cancellation_token: tokio_util::sync::CancellationToken,
         task_pool: flume::Receiver<ProducerTask>,
@@ -33,7 +30,6 @@ impl NetworkProducer {
         Self {
             url,
             client,
-            page_size,
             cancellation_token,
             task_pool,
             task_retry_pool,
@@ -41,33 +37,15 @@ impl NetworkProducer {
             result_pool,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl StreamProducer for NetworkProducer {
-    async fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
-        self.cancellation_token.cancelled()
-    }
-    async fn task(&self) -> Result<ProducerTask, flume::RecvError> {
-        self.task_pool.recv_async().await
-    }
-    async fn task_retry(&self) -> Result<ProducerTask, flume::RecvError> {
-        self.task_retry_pool.recv_async().await
-    }
-    async fn memory(&self) -> Result<Vec<u8>, flume::RecvError> {
-        self.memory_pool.recv_async().await
-    }
-    fn send_result(&self, result: ProducerResult) -> Result<(), flume::SendError<ProducerResult>> {
-        self.result_pool.send(result)
-    }
-    async fn produce(
+    pub async fn produce(
         &mut self,
         input: &mut ProducerResult,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let buffer = &mut input.buffer;
-        let range_start = input.page_number * self.page_size as u64;
-        let size = input.number_of_pages * self.page_size as u64;
-        let range_end = range_start + size;
+        let range_start = input.page_number * 4096 as u64;
+        let size = input.number_of_pages * 4096 as u64;
+        let range_end = range_start + size - 1;
 
         let range_header = format!("bytes={range_start}-{range_end}");
 
