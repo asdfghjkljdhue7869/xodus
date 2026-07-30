@@ -7,7 +7,7 @@ use crate::{
     streaming::producer::StreamProducer,
     xvd::{SegmentFile, XvdFile},
 };
-use std::{collections::HashMap, os::unix::fs::FileExt};
+use std::{collections::HashMap, io::Seek, ops::Div, os::unix::fs::FileExt};
 use std::{os::unix::fs::MetadataExt, path::PathBuf};
 use tokio::io::BufReader;
 use tokio_util::sync::CancellationToken;
@@ -172,18 +172,23 @@ impl StreamManager {
         assert!(resident_length.is_multiple_of(STREAM_PAGE_SIZE as u64));
         let resident_path = self.parameters.destination.join(&uuid);
 
-        // TODO: add a version check too, and possibly a continuation codepath
-        if tokio::fs::metadata(&resident_path)
-            .await
-            .is_ok_and(|m| m.size() == resident_length)
-        {
-            return Ok(uuid);
+        // TODO: add a version check too
+        let mut continue_from = 0;
+        if let Ok(metadata) = tokio::fs::metadata(&resident_path).await {
+            if metadata.size() == resident_length {
+                return Ok(uuid);
+            } else if metadata.size() < resident_length {
+                continue_from = metadata.size();
+            }
         }
 
         // Schedule full resident stream
+        let start_buffer = continue_from.div(STREAM_RESULT_BUFFER_SIZE as u64);
         let buffer_count = resident_length.div_ceil(STREAM_RESULT_BUFFER_SIZE as u64);
+        let saved_pages = continue_from / STREAM_PAGE_SIZE as u64;
         let mut pages_left = resident_length / STREAM_PAGE_SIZE as u64;
-        for i in 0..buffer_count {
+        pages_left = pages_left - saved_pages;
+        for i in start_buffer..buffer_count {
             let number_of_pages = pages_left.min(STREAM_PAGES_PER_BUFFER as u64);
             let message = ProducerTask::Download {
                 page_number: i * STREAM_PAGES_PER_BUFFER as u64,
@@ -202,7 +207,7 @@ impl StreamManager {
                 .open(resident_path)?;
 
             let mut downloaded = 0;
-            while downloaded < buffer_count {
+            while downloaded < (buffer_count - start_buffer) {
                 let result = rx.recv()?;
                 let start_offset = page_number_to_offset(result.page_number);
                 let size = page_number_to_offset(result.number_of_pages);
