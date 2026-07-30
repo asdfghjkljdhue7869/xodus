@@ -111,7 +111,7 @@ async fn main() -> ExitCode {
     env_logger::init_from_env("XODUS_LOG");
     let client = reqwest::ClientBuilder::new()
         .user_agent(format!("xodus-cli/{}", env!("CARGO_PKG_VERSION")))
-        .connection_verbose(true)
+        .connection_verbose(false)
         .build()
         .unwrap();
     let args = CliArgs::parse();

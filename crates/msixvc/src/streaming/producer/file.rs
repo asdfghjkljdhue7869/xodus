@@ -5,7 +5,7 @@ use crate::models::streaming::{ProducerResult, ProducerTask};
 /// Pipeline producer from File source
 #[derive(Debug)]
 pub struct FileProducer {
-    file: tokio::fs::File,
+    file: tokio::io::BufReader<tokio::fs::File>,
 
     pub(super) cancellation_token: tokio_util::sync::CancellationToken,
 
@@ -25,7 +25,7 @@ impl FileProducer {
         result_pool: flume::Sender<ProducerResult>,
     ) -> Self {
         Self {
-            file,
+            file: tokio::io::BufReader::new(file),
             cancellation_token,
             task_pool,
             task_retry_pool,

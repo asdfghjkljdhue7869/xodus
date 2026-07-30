@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::models::streaming::{ProducerResult, ProducerTask};
 
 pub mod file;
@@ -22,7 +24,7 @@ pub enum StreamProducer {
 }
 
 impl StreamProducer {
-    async fn produce(
+    pub async fn produce(
         &mut self,
         input: &mut ProducerResult,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -32,28 +34,35 @@ impl StreamProducer {
         }
     }
 
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::File(f) => f.cancellation_token.is_cancelled(),
+            Self::Network(n) => n.cancellation_token.is_cancelled(),
+        }
+    }
+
     async fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
         match self {
             Self::File(f) => f.cancellation_token.cancelled(),
             Self::Network(n) => n.cancellation_token.cancelled(),
         }
     }
-    async fn task(&self) -> Result<ProducerTask, flume::RecvError> {
+    fn task(&self) -> Result<ProducerTask, flume::TryRecvError> {
         match self {
-            Self::File(f) => f.task_pool.recv_async().await,
-            Self::Network(n) => n.task_pool.recv_async().await,
+            Self::File(f) => f.task_pool.try_recv(),
+            Self::Network(n) => n.task_pool.try_recv(),
         }
     }
-    async fn task_retry(&self) -> Result<ProducerTask, flume::RecvError> {
+    fn task_retry(&self) -> Result<ProducerTask, flume::TryRecvError> {
         match self {
-            Self::File(f) => f.task_retry_pool.recv_async().await,
-            Self::Network(n) => n.task_retry_pool.recv_async().await,
+            Self::File(f) => f.task_retry_pool.try_recv(),
+            Self::Network(n) => n.task_retry_pool.try_recv(),
         }
     }
     async fn memory(&self) -> Result<Vec<u8>, flume::RecvError> {
         match self {
-            Self::File(f) => f.memory_pool.recv(),
-            Self::Network(n) => n.memory_pool.recv(),
+            Self::File(f) => f.memory_pool.recv_async().await,
+            Self::Network(n) => n.memory_pool.recv_async().await,
         }
     }
     fn send_result(&self, result: ProducerResult) -> Result<(), flume::SendError<ProducerResult>> {
@@ -69,16 +78,24 @@ pub async fn run_producer_loop(
     retry_tx: flume::Sender<ProducerTask>,
 ) {
     loop {
-        let task = tokio::select! {
-            retry_task = producer.task_retry() => retry_task,
-            task = producer.task() => task,
-            _ = producer.cancelled() => break,
-        };
+        log::trace!("Waiting for task");
 
-        let Ok(task) = task else {
-            log::error!("Producer got RecvError on task, unrecoverable error, exiting task");
-            break;
+        let task = loop {
+            let _ = tokio::time::sleep(Duration::from_millis(5)).await;
+            if producer.is_cancelled() {
+                return;
+            }
+            let task = producer.task_retry().or_else(|_| producer.task());
+            match task {
+                Err(flume::TryRecvError::Empty) => continue,
+                Err(flume::TryRecvError::Disconnected) => {
+                    log::error!("Producer channel Closed task, unrecoverable error, exiting task");
+                    return;
+                }
+                Ok(task) => break task,
+            }
         };
+        log::trace!("Got task");
 
         let mut result = match task {
             ProducerTask::End => break,
@@ -105,6 +122,7 @@ pub async fn run_producer_loop(
             }
         };
 
+        log::trace!("Producing");
         let produce_result = producer.produce(&mut result).await;
 
         match produce_result {

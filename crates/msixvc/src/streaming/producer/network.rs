@@ -48,7 +48,7 @@ impl NetworkProducer {
         let range_end = range_start + size - 1;
 
         let range_header = format!("bytes={range_start}-{range_end}");
-
+        log::trace!("Requesting {range_header}");
         let response = self
             .client
             .get(&self.url)
@@ -61,7 +61,7 @@ impl NetworkProducer {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             let read = chunk.len();
-            buffer[read_total..].copy_from_slice(&chunk);
+            buffer[read_total..read_total + chunk.len()].copy_from_slice(&chunk);
             read_total += read;
         }
         let difference = read_total.abs_diff(size as usize);

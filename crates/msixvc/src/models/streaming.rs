@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub enum ProducerTask {
     Download {
         page_number: u64,
@@ -7,6 +8,7 @@ pub enum ProducerTask {
     End,
 }
 
+#[derive(Debug)]
 pub struct ProducerResult {
     pub page_number: u64,
     pub number_of_pages: u64,

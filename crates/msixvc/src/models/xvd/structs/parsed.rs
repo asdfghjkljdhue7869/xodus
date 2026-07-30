@@ -275,7 +275,7 @@ pub struct XvcRegionHeader {
     pub key_id: XvcKeyId,
     pub flags: XvcRegionFlags,
     pub first_segment_index: u32,
-    pub description: [u16; 0x20], // UTF-16
+    pub description: String, // UTF-16
     // Multiple of PAGE_SIZE
     pub offset: u64,
     // Multiple of PAGE_SIZE
@@ -312,7 +312,7 @@ impl TryFrom<raw::XvcRegionHeader> for XvcRegionHeader {
             key_id: XvcKeyId::new(value.key_id.get()),
             flags: XvcRegionFlags::from_bits_retain(value.flags.get()),
             first_segment_index: value.first_segment_index.get(),
-            description: value.description.map(|n| n.get()),
+            description: String::from_utf16_lossy(&value.description.map(|n| n.get())),
             offset,
             length,
             hash: value.hash.get(),

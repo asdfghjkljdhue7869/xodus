@@ -338,15 +338,22 @@ impl XvdFile {
         prefix_len
     }
 
-    pub async fn parse_file(path: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn parse_file(
+        path: String,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut file = OpenOptions::new().read(true).open(path.clone()).await?;
         Self::parse(&mut file).await
     }
 
-    pub async fn parse<Reader>(mut file: Reader) -> Result<Self, Box<dyn std::error::Error>>
+    pub async fn parse<Reader>(
+        mut file: Reader,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
+        log::trace!("Parsing XvdFile");
+        let mut file = BufReader::new(file);
+        file.rewind().await?;
         let xvd_header = XvdHeader::read(&mut file).await?;
 
         let mdu_offset = xvd_header.mdu_offset();
@@ -439,6 +446,7 @@ impl XvdFile {
                 data_hashs,
             });
         }
+        log::trace!("Parsing XvdFile - complete");
         Ok(XvdFile {
             header: xvd_header,
             drive_data_offset,
@@ -450,10 +458,11 @@ impl XvdFile {
     pub async fn parse_user_package_files<Reader>(
         &self,
         mut file: Reader,
-    ) -> Result<HashMap<String, UserPackageFile>, Box<dyn std::error::Error>>
+    ) -> Result<HashMap<String, UserPackageFile>, Box<dyn std::error::Error + Send + Sync>>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
+        log::trace!("Parsing user package files");
         let mut files = HashMap::new();
 
         let user_data_offset = self.user_data_offset;
@@ -488,6 +497,7 @@ impl XvdFile {
                 );
             }
         }
+        log::trace!("Parsing user package files - complete");
         Ok(files)
     }
 
@@ -495,10 +505,12 @@ impl XvdFile {
         &self,
         file: Reader,
         segment_metadata: &UserPackageFile,
-    ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error>>
+    ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error + Send + Sync>>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
+        log::trace!("Parsing segment metadata");
+
         let mut file = BufReader::with_capacity(segment_metadata.length as usize, file);
         file.seek(SeekFrom::Start(segment_metadata.offset)).await?;
         let segment_header = XvdSegmentMetadataHeader::read(&mut file).await?;
@@ -512,6 +524,7 @@ impl XvdFile {
         }
 
         let mut files = HashMap::new();
+        let mut buf = vec![0u16; u16::MAX as usize];
 
         for section in &self.encrypted_section_infos {
             let segment_page_start = section.section_offset.div_ceil(PAGE_SIZE as u64);
@@ -519,14 +532,13 @@ impl XvdFile {
             for segment_no in section.first_segment_index..segment_header.segment_count {
                 let segment = &segments[segment_no as usize];
                 let s = segment.path_length;
-                let mut buf = vec![0u16, 0];
-                buf.resize(s as usize, 0);
+
                 file.seek(SeekFrom::Start(
                     segment_metadata.offset + paths_offset + segment.path_offset as u64,
                 ))
                 .await?;
                 file.read_exact(buf.as_mut_bytes()).await?;
-                let file_name: String = String::from_utf16(buf.as_slice()).unwrap();
+                let file_name: String = String::from_utf16(&buf[..s as usize]).unwrap();
                 let page_length = if segment.filesize == 0 {
                     1
                 } else {
@@ -556,13 +568,15 @@ impl XvdFile {
                 page_offset += page_length;
             }
         }
+        log::trace!("Parsing segment metadata - complete");
         Ok(files)
     }
 
     pub fn populate_segment_hashes(
         &self,
         files: &mut HashMap<String, SegmentFile>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        log::trace!("Populating segment hashes");
         for (name, file) in files.iter_mut() {
             if !file.data_hashs.is_empty() {
                 continue;
@@ -620,7 +634,7 @@ impl XvdFile {
 
             file.data_hashs = section.data_hashs[start..end].into();
         }
-
+        log::trace!("Populating segment hashes - complete");
         Ok(())
     }
 
@@ -628,10 +642,12 @@ impl XvdFile {
         &self,
         file: Reader,
         only_plain: bool,
-    ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error>>
+    ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error + Send + Sync>>
     where
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
+        log::trace!("Parsing NTFS segment metadata");
+
         let drive_data_offset = self.drive_data_offset;
         let drive_size = self.header.drive_size;
         let drive_plain_len = self.non_encrypted_prefix_len(drive_data_offset, drive_size);
@@ -718,6 +734,8 @@ impl XvdFile {
                     },
                 );
             }
+
+            log::trace!("Parsing NTFS segment metadata - complete");
 
             self.populate_segment_hashes(&mut files)?;
 
