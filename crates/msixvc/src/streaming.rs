@@ -7,7 +7,7 @@ use crate::{
     streaming::producer::StreamProducer,
     xvd::{SegmentFile, XvdFile},
 };
-use std::{collections::HashMap, io::Seek, ops::Div, os::unix::fs::FileExt};
+use std::{collections::HashMap, ops::Div, os::unix::fs::FileExt};
 use std::{os::unix::fs::MetadataExt, path::PathBuf};
 use tokio::io::BufReader;
 use tokio_util::sync::CancellationToken;
@@ -57,6 +57,7 @@ pub struct StreamManager {
     parameters: StreamingParameters,
     worker_channels: WorkerChannels,
     cancellation_token: CancellationToken,
+    total_size: u64,
 }
 
 impl StreamManager {
@@ -66,6 +67,7 @@ impl StreamManager {
             parameters,
             worker_channels: WorkerChannels::new(memory_chunks_cap),
             cancellation_token: CancellationToken::new(),
+            total_size: 0,
         }
     }
 
@@ -74,16 +76,18 @@ impl StreamManager {
     }
 
     pub fn begin(
-        self,
+        mut self,
     ) -> tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> {
         self.allocate_memory();
         tokio::spawn(async move {
             let mut rfiles: HashMap<String, SegmentFile> = HashMap::new();
             let mut lfiles: HashMap<String, SegmentFile> = HashMap::new();
             let producer = self.initialize_producer().await?;
+            self.total_size = producer.len().await?;
             let mut scale = scaling::ProducerScaler::new(
                 producer,
                 self.worker_channels.task_retry_pool.0.clone().downgrade(),
+                self.parameters.progress_channel.clone().downgrade(),
             );
             scale.start();
 
@@ -92,22 +96,21 @@ impl StreamManager {
 
             let mut resident_file =
                 tokio::fs::File::open(self.parameters.destination.join(resident_file_name)).await?;
-            let xvd_file = XvdFile::parse(&mut resident_file).await?;
+            let mut buffered_file =
+                BufReader::with_capacity(4 * STREAM_PAGES_PER_BUFFER, &mut resident_file);
+            let xvd_file = XvdFile::parse(&mut buffered_file).await?;
 
             let files = xvd_file
-                .parse_user_package_files(&mut resident_file)
+                .parse_user_package_files(&mut buffered_file)
                 .await?;
-            for (k, v) in &files {
-                if k == "SegmentMetadata.bin" {
-                    let sfiles = xvd_file
-                        .parse_segment_metadata(&mut resident_file, v)
-                        .await?;
-                    rfiles = sfiles;
-                    break;
-                }
+            if let Some(v) = files.get("SegmentMetadata.bin") {
+                let sfiles = xvd_file
+                    .parse_segment_metadata(&mut buffered_file, v)
+                    .await?;
+                rfiles = sfiles;
             }
             let sfiles = xvd_file
-                .parse_ntfs_segment_metadata(&mut resident_file, !rfiles.is_empty())
+                .parse_ntfs_segment_metadata(&mut buffered_file, !rfiles.is_empty())
                 .await?;
             rfiles.extend(sfiles);
 
@@ -121,12 +124,14 @@ impl StreamManager {
         log::trace!("Started bootstrap");
         let task_tx = &self.worker_channels.task_pool.0;
         let memory_tx = &self.worker_channels.memory_pool.0;
+        let progress_tx = &self.parameters.progress_channel;
         let rx = &self.worker_channels.producer_result_pool.1;
 
         task_tx
             .send_async(ProducerTask::Download {
                 page_number: 0,
                 number_of_pages: 1,
+                skip_progress: true,
             })
             .await?;
         let xvd_frame = rx.recv_async().await?;
@@ -143,6 +148,7 @@ impl StreamManager {
                 .send_async(ProducerTask::Download {
                     page_number: offset_to_page_number(xvc_info_offset),
                     number_of_pages: 2,
+                    skip_progress: true,
                 })
                 .await?;
             let xvc_frame = rx.recv_async().await?;
@@ -176,9 +182,15 @@ impl StreamManager {
         let mut continue_from = 0;
         if let Ok(metadata) = tokio::fs::metadata(&resident_path).await {
             if metadata.size() == resident_length {
+                progress_tx
+                    .send(StreamProgress::Resume(resident_length))
+                    .await?;
                 return Ok(uuid);
             } else if metadata.size() < resident_length {
                 continue_from = metadata.size();
+                progress_tx
+                    .send(StreamProgress::Resume(continue_from))
+                    .await?;
             }
         }
 
@@ -193,6 +205,7 @@ impl StreamManager {
             let message = ProducerTask::Download {
                 page_number: i * STREAM_PAGES_PER_BUFFER as u64,
                 number_of_pages,
+                skip_progress: false,
             };
             pages_left -= number_of_pages;
             task_tx.send_async(message).await?;
@@ -200,6 +213,7 @@ impl StreamManager {
 
         let rx = rx.clone();
         let memory_tx = memory_tx.clone();
+        let progress_tx = progress_tx.clone();
         tokio::task::spawn_blocking(move || {
             let resident_file = std::fs::OpenOptions::new()
                 .write(true)
@@ -212,6 +226,7 @@ impl StreamManager {
                 let start_offset = page_number_to_offset(result.page_number);
                 let size = page_number_to_offset(result.number_of_pages);
                 resident_file.write_all_at(&result.buffer[..size as usize], start_offset)?;
+                progress_tx.blocking_send(StreamProgress::Write(size))?;
                 downloaded += 1;
                 memory_tx.send(result.buffer)?;
             }
@@ -230,7 +245,7 @@ impl StreamManager {
     ) -> Result<StreamProducer, Box<dyn std::error::Error + Send + Sync>> {
         let producer = match &self.parameters.source {
             StreamSource::File(file_path) => self.initialize_file_producer(file_path).await?,
-            StreamSource::Url(url) => self.initialize_network_producer(url).await?,
+            StreamSource::Url(urls) => self.initialize_network_producer(urls).await?,
         };
         Ok(producer)
     }
@@ -254,7 +269,10 @@ impl StreamManager {
         )))
     }
 
-    async fn initialize_network_producer(&self, url: &str) -> tokio::io::Result<StreamProducer> {
+    async fn initialize_network_producer(
+        &self,
+        urls: &Vec<String>,
+    ) -> tokio::io::Result<StreamProducer> {
         let client = self.parameters.client.clone();
         let task_pool = self.worker_channels.task_pool.1.clone();
         let task_retry_pool = self.worker_channels.task_retry_pool.1.clone();
@@ -263,7 +281,7 @@ impl StreamManager {
         Ok(StreamProducer::Network(
             producer::network::NetworkProducer::new(
                 client,
-                url.to_owned(),
+                urls.clone(),
                 self.cancellation_token(),
                 task_pool,
                 task_retry_pool,

@@ -71,7 +71,7 @@ pub struct XvdHashEntry {
 #[repr(C, packed)]
 pub struct XvcInfo {
     pub content_id: [u8; 0x10],
-    pub xvc_encryption_key_id: [[u8; 0x10]; 0xC0],
+    pub xvc_encryption_key_ids: [[u8; 0x10]; 0xC0],
     pub description: [u8; 0x100],
     pub version: U32,
     pub region_count: U32,

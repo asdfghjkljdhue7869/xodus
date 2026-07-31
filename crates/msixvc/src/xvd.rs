@@ -159,26 +159,10 @@ impl<R: Write + Seek> Write for SyncSubstream<R> {
     }
 }
 
-struct XvdEncryptionInfo {
-    encrypted_sections: Vec<EncryptedSectionInfo>,
-}
-
-// The gpt crate requires the device to implement Debug,
-// but the content key must not be debuged
-impl Debug for XvdEncryptionInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("XvdEncryptionInfo")
-            .field("encrypted_sections", &self.encrypted_sections)
-            .finish_non_exhaustive() // prints ", .." to signal redacted fields
-    }
-}
-
 struct XvdStream<R> {
     inner: R,
     offset: u64,
     end_offset: u64,
-
-    encryption_info: Option<XvdEncryptionInfo>,
 }
 
 impl<R> Debug for XvdStream<R> {
@@ -186,7 +170,6 @@ impl<R> Debug for XvdStream<R> {
         f.debug_struct("XvdStream")
             .field("offset", &self.offset)
             .field("end_offset", &self.end_offset)
-            .field("encryption_info", &self.encryption_info)
             .finish_non_exhaustive()
     }
 }
@@ -277,23 +260,9 @@ impl<R> Write for XvdStream<R> {
 pub struct XvdFile {
     header: XvdHeader,
     drive_data_offset: u64,
-    encrypted_section_infos: Vec<EncryptedSectionInfo>,
+    encryption_key_ids: Vec<uuid::Uuid>,
+    encrypted_regions: Vec<XvcRegionHeader>,
     user_data_offset: u64,
-}
-
-#[derive(Debug)]
-pub struct EncryptedSectionInfo {
-    section_offset: u64,
-    section_length: u64,
-
-    header_id: XvcRegionId,
-    vduid: [u8; 8],
-
-    // If integrity is enabled, this must contain one entry per page in the section.
-    // If integrity is disabled, use page_in_section as the data unit instead.
-    data_units: Option<Vec<u32>>,
-    first_segment_index: u32,
-    data_hashs: Vec<[u8; 20]>,
 }
 
 pub struct UserPackageFile {
@@ -317,11 +286,9 @@ impl XvdFile {
         let end = start.saturating_add(len);
         let mut prefix_len = len;
 
-        for section in &self.encrypted_section_infos {
-            let section_start = section.section_offset;
-            let section_end = section
-                .section_offset
-                .saturating_add(section.section_length);
+        for section in &self.encrypted_regions {
+            let section_start = section.offset;
+            let section_end = section.offset.saturating_add(section.length);
 
             if section_end <= start || section_start >= end {
                 continue;
@@ -352,7 +319,6 @@ impl XvdFile {
         Reader: AsyncRead + AsyncSeek + Unpin,
     {
         log::trace!("Parsing XvdFile");
-        let mut file = BufReader::new(file);
         file.rewind().await?;
         let xvd_header = XvdHeader::read(&mut file).await?;
 
@@ -361,14 +327,14 @@ impl XvdFile {
         let xvc_info_offset = xvd_header.xvc_info_offset(hash_tree_page_count);
 
         let mut region_headers: Vec<XvcRegionHeader> = Vec::new();
-
+        let mut encryption_key_ids = Vec::with_capacity(0);
         // TODO: Check if we have proper content type
         if xvd_header.xvc_data_length > 0 {
             file.seek(std::io::SeekFrom::Start(xvc_info_offset))
                 .await
                 .expect("Unable to seek");
             let xvc_info = XvcInfo::read(&mut file).await?;
-
+            encryption_key_ids = xvc_info.xvc_encryption_key_ids;
             let region_count = xvc_info.region_count;
 
             if xvc_info.version >= 1 {
@@ -392,65 +358,18 @@ impl XvdFile {
         let drive_data_offset =
             page_number_to_offset(xvd_header.dynamic_header_page_count()) + dynamic_header_offset;
 
-        let mut enc_sections: Vec<EncryptedSectionInfo> = vec![];
-        let mut reader = BufReader::with_capacity(PAGES_PER_BLOCK * XvdHashEntry::RAW_SIZE, file);
-        for h in region_headers {
-            let key_id = h.key_id;
-            let length = h.length;
-            match key_id.get() {
-                None => continue,
-                Some(0) => (),
-                Some(n) => todo!("KeyID other than 0 or unencrypted is not supported, found {n}"),
-            }
+        let encrypted_regions = region_headers
+            .iter()
+            .filter(|reg| reg.key_id.is_encrypted())
+            .cloned()
+            .collect();
 
-            let start_page = offset_to_page_number(h.offset - user_data_offset);
-            let num_pages = bytes_to_pages(length);
-            let mut data_units: Vec<u32> = Vec::with_capacity(num_pages as usize);
-            let mut data_hashs: Vec<[u8; 20]> = Vec::with_capacity(num_pages as usize);
-
-            let mut page = 0;
-            loop {
-                if page >= num_pages {
-                    break;
-                }
-                let (hash_block, entry_start, run_length) =
-                    calculate_hash_block_num_and_run_for_block_num(
-                        xvd_header.xvd_type as u32,
-                        _hash_tree_levels,
-                        xvd_header.number_of_hashed_pages(),
-                        start_page + page,
-                        0,
-                        false,
-                        false,
-                    );
-                let run_length = min(run_length, num_pages - page);
-                page += run_length;
-                let read_offset = hash_tree_offset
-                    + page_number_to_offset(hash_block)
-                    + (entry_start * XvdHashEntry::RAW_SIZE as u64);
-                reader.seek(SeekFrom::Start(read_offset)).await?;
-                for _ in 0..run_length {
-                    let hash = XvdHashEntry::read(&mut reader).await?;
-                    data_units.push(hash.unit);
-                    data_hashs.push(hash.block_hash);
-                }
-            }
-
-            enc_sections.push(EncryptedSectionInfo {
-                section_offset: h.offset,
-                section_length: h.length,
-                header_id: h.region_id,
-                vduid: xvd_header.vduid.to_bytes_le()[..8].try_into().unwrap(),
-                data_units: Some(data_units),
-                first_segment_index: h.first_segment_index,
-                data_hashs,
-            });
-        }
         log::trace!("Parsing XvdFile - complete");
         Ok(XvdFile {
             header: xvd_header,
+            encryption_key_ids,
             drive_data_offset,
-            encrypted_section_infos: enc_sections,
+            encrypted_regions,
             user_data_offset,
         })
     }
@@ -503,7 +422,7 @@ impl XvdFile {
 
     pub async fn parse_segment_metadata<Reader>(
         &self,
-        file: Reader,
+        mut file: Reader,
         segment_metadata: &UserPackageFile,
     ) -> Result<HashMap<String, SegmentFile>, Box<dyn std::error::Error + Send + Sync>>
     where
@@ -511,7 +430,6 @@ impl XvdFile {
     {
         log::trace!("Parsing segment metadata");
 
-        let mut file = BufReader::with_capacity(segment_metadata.length as usize, file);
         file.seek(SeekFrom::Start(segment_metadata.offset)).await?;
         let segment_header = XvdSegmentMetadataHeader::read(&mut file).await?;
         let paths_offset =
@@ -526,8 +444,8 @@ impl XvdFile {
         let mut files = HashMap::new();
         let mut buf = vec![0u16; u16::MAX as usize];
 
-        for section in &self.encrypted_section_infos {
-            let segment_page_start = section.section_offset.div_ceil(PAGE_SIZE as u64);
+        for section in &self.encrypted_regions {
+            let segment_page_start = section.offset.div_ceil(PAGE_SIZE as u64);
             let mut page_offset = segment_page_start;
             for segment_no in section.first_segment_index..segment_header.segment_count {
                 let segment = &segments[segment_no as usize];
@@ -544,22 +462,15 @@ impl XvdFile {
                 } else {
                     segment.filesize.div_ceil(PAGE_SIZE as u64)
                 };
-                if page_offset * (PAGE_SIZE as u64)
-                    >= section.section_offset + section.section_length
-                {
+                if page_offset * (PAGE_SIZE as u64) >= section.offset + section.length {
                     break;
                 }
-                let end = page_offset as usize - segment_page_start as usize
-                    + segment.filesize.div_ceil(PAGE_SIZE as u64) as usize;
-                let data_hashs: Vec<[u8; 20]> = section.data_hashs
-                    [page_offset as usize - segment_page_start as usize..end]
-                    .into();
                 files.insert(
                     file_name,
                     SegmentFile {
                         offset: page_offset * PAGE_SIZE as u64,
                         length: segment.filesize,
-                        data_hashs,
+                        data_hashs: vec![],
                         keep_encrypted: segment
                             .flags
                             .contains(XvdSegmentMetadataSegmentFlags::KEEP_ENCRYPTED_ON_DISK),
@@ -570,72 +481,6 @@ impl XvdFile {
         }
         log::trace!("Parsing segment metadata - complete");
         Ok(files)
-    }
-
-    pub fn populate_segment_hashes(
-        &self,
-        files: &mut HashMap<String, SegmentFile>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        log::trace!("Populating segment hashes");
-        for (name, file) in files.iter_mut() {
-            if !file.data_hashs.is_empty() {
-                continue;
-            }
-
-            let Some(section) = self.encrypted_section_infos.iter().find(|section| {
-                file.offset >= section.section_offset
-                    && file.offset < section.section_offset + section.section_length
-            }) else {
-                continue;
-            };
-
-            let file_end = file.offset.saturating_add(file.length);
-            let section_end = section
-                .section_offset
-                .saturating_add(section.section_length);
-            if file_end > section_end {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "segment file spans beyond encrypted section: {} ({}..{} > {}..{})",
-                        name, file.offset, file_end, section.section_offset, section_end
-                    ),
-                )
-                .into());
-            }
-
-            let segment_page_start = section.section_offset.div_ceil(PAGE_SIZE as u64);
-            let page_offset = file.offset.div_ceil(PAGE_SIZE as u64);
-            let page_count = file.length.div_ceil(PAGE_SIZE as u64) as usize;
-            let start = page_offset.checked_sub(segment_page_start).ok_or_else(|| {
-                io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "segment page offset before section start: {} ({})",
-                        name, file.offset
-                    ),
-                )
-            })? as usize;
-            let end = start + page_count;
-
-            if end > section.data_hashs.len() {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "missing data hashes for {}: need [{}..{}], have {}",
-                        name,
-                        start,
-                        end,
-                        section.data_hashs.len()
-                    ),
-                )
-                .into());
-            }
-
-            file.data_hashs = section.data_hashs[start..end].into();
-        }
-        log::trace!("Populating segment hashes - complete");
-        Ok(())
     }
 
     pub async fn parse_ntfs_segment_metadata<Reader>(
@@ -659,7 +504,6 @@ impl XvdFile {
                     inner: SyncIoBridge::new(file),
                     offset: drive_data_offset,
                     end_offset: drive_data_offset + drive_plain_len,
-                    encryption_info: None,
                 },
                 0,
                 drive_plain_len,
@@ -695,7 +539,6 @@ impl XvdFile {
                     inner: bridge,
                     offset: partition_offset,
                     end_offset: partition_offset + partition_plain_len,
-                    encryption_info: None,
                 },
                 0,
                 partition_plain_len,
@@ -737,184 +580,8 @@ impl XvdFile {
 
             log::trace!("Parsing NTFS segment metadata - complete");
 
-            self.populate_segment_hashes(&mut files)?;
-
             Ok(files)
         })
-    }
-
-    pub async fn download_file_http<Writer, Progress>(
-        &self,
-        client: &reqwest::Client,
-        url: &str,
-        out: &mut Writer,
-        sfile: &SegmentFile,
-        full_key: [u8; 32],
-        mut progress: Progress,
-    ) -> Result<(), Box<dyn std::error::Error>>
-    where
-        Writer: AsyncWrite + Unpin,
-        Progress: FnMut(u64, u64),
-    {
-        if sfile.length == 0 {
-            return Ok(());
-        }
-
-        let s = &self.encrypted_section_infos.iter().find(|s| {
-            sfile.offset >= s.section_offset && sfile.offset < s.section_offset + s.section_length
-        });
-
-        let mut tweak = None;
-        let mut tweak_cipher = None;
-        let mut data_cipher = None;
-
-        let file_offset_in_section;
-
-        if let Some(s) = s
-            && !sfile.keep_encrypted
-        {
-            let mut tweak_key = [0u8; 16];
-            let mut data_key = [0u8; 16];
-            tweak_key.copy_from_slice(&full_key[..16]);
-            data_key.copy_from_slice(&full_key[16..]);
-
-            tweak = Some(Tweak::new(0, s.header_id, s.vduid));
-            tweak_cipher = Some(Aes128::new((&tweak_key).into()));
-            data_cipher = Some(Aes128::new((&data_key).into()));
-            file_offset_in_section = sfile.offset - s.section_offset;
-        } else {
-            // TODO for data integrity we need a section for unencrypted sections...
-            file_offset_in_section = sfile.offset;
-        }
-        let page_start = file_offset_in_section / PAGE_SIZE as u64;
-        let page_count = sfile.length.div_ceil(PAGE_SIZE as u64);
-
-        let mut page = [0u8; PAGE_SIZE];
-        let mut remaining = sfile.length;
-        let mut page_in_section = page_start;
-        let page_length = sfile.length.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64;
-        let mut stream = None;
-        let mut pending = bytes::BytesMut::new();
-        let mut v: u64 = 0;
-
-        let stall_timeout = tokio::time::Duration::from_secs(5);
-        if let Ok(Ok(Ok(response))) = timeout(
-            stall_timeout,
-            client
-                .get(url)
-                .header(
-                    RANGE,
-                    format!(
-                        "bytes={}-{}",
-                        sfile.offset + v,
-                        sfile.offset + page_length - 1
-                    ),
-                )
-                .send(),
-        )
-        .await
-        .map(|o| o.map(|o| o.error_for_status()))
-            && response.status() == 206
-        {
-            stream = Some(response.bytes_stream());
-        }
-        loop {
-            if page_in_section >= page_start + page_count || remaining == 0 {
-                break;
-            }
-            let next = if let Some(s) = stream.as_mut() {
-                timeout(stall_timeout, s.next()).await
-            } else {
-                Ok(None)
-            };
-            let data: Bytes;
-            if let Ok(Some(Ok(b))) = next {
-                data = b;
-            } else {
-                // error
-                if let Ok(Ok(Ok(response))) = timeout(
-                    stall_timeout,
-                    client
-                        .get(url)
-                        .header(
-                            RANGE,
-                            format!(
-                                "bytes={}-{}",
-                                sfile.offset + v,
-                                sfile.offset + page_length - 1
-                            ),
-                        )
-                        .send(),
-                )
-                .await
-                .map(|o| o.map(|o| o.error_for_status()))
-                    && response.status() == 206
-                {
-                    stream = Some(response.bytes_stream());
-                    continue;
-                }
-                continue;
-            }
-
-            v += data.len() as u64;
-            progress(min(v, sfile.length), sfile.length);
-
-            pending.extend_from_slice(&data);
-
-            while pending.len() >= 4096 {
-                if page_in_section >= page_start + page_count || remaining == 0 {
-                    break;
-                }
-                let chunk = pending.split_to(4096);
-                page.copy_from_slice(&chunk);
-                let to_write_remaining = remaining.min(PAGE_SIZE as u64) as usize;
-                let to_write = if let Some(tweak) = tweak.as_mut() {
-                    tweak.update_data_unit(match &s.unwrap().data_units {
-                        Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "{} units {} page_in_section {} ({}+{})",
-                                    "missing data unit",
-                                    (*units).len(),
-                                    page_in_section,
-                                    page_start,
-                                    page_count
-                                ),
-                            )
-                        })?,
-                        None => page_in_section as u32,
-                    });
-                    decrypt_page_xts(
-                        &mut page,
-                        *tweak,
-                        tweak_cipher.as_ref().unwrap(),
-                        data_cipher.as_ref().unwrap(),
-                    );
-                    to_write_remaining
-                } else if sfile.keep_encrypted {
-                    // Decryption needs full 4k blocks
-                    PAGE_SIZE
-                } else {
-                    to_write_remaining
-                };
-                while let Err(err) = out.write_all(&page[..to_write]).await {
-                    eprintln!("Error write file {} waiting 30s", err);
-                    println!("Error write file {} waiting 30s", err);
-                    sleep(tokio::time::Duration::from_secs(30)).await;
-                }
-                remaining -= to_write_remaining as u64;
-
-                page_in_section += 1;
-            }
-        }
-        if remaining > 0 {
-            return Err(Box::new(std::io::Error::other(format!(
-                "{} of {} missing have {}",
-                remaining, sfile.length, v
-            ))));
-        }
-        Ok(())
     }
 
     async fn extract_file_ex<Writer, Reader, Progress>(
@@ -935,9 +602,10 @@ impl XvdFile {
             return Ok(());
         }
 
-        let s = &self.encrypted_section_infos.iter().find(|s| {
-            sfile.offset >= s.section_offset && sfile.offset < s.section_offset + s.section_length
-        });
+        let s = &self
+            .encrypted_regions
+            .iter()
+            .find(|s| sfile.offset >= s.offset && sfile.offset < s.offset + s.length);
 
         let mut tweak = None;
         let mut tweak_cipher = None;
@@ -953,10 +621,14 @@ impl XvdFile {
             tweak_key.copy_from_slice(&full_key[..16]);
             data_key.copy_from_slice(&full_key[16..]);
 
-            tweak = Some(Tweak::new(0, s.header_id, s.vduid));
+            tweak = Some(Tweak::new(
+                0,
+                s.region_id,
+                self.header.vduid.to_bytes_le()[..8].try_into().unwrap(),
+            ));
             tweak_cipher = Some(Aes128::new((&tweak_key).into()));
             data_cipher = Some(Aes128::new((&data_key).into()));
-            file_offset_in_section = sfile.offset - s.section_offset;
+            file_offset_in_section = sfile.offset - s.offset;
         } else {
             // TODO for data integrity we need a section for unencrypted sections...
             file_offset_in_section = sfile.offset;
@@ -981,28 +653,29 @@ impl XvdFile {
                     ),
             ) as usize;
             let to_write = if let Some(tweak) = tweak.as_mut() {
-                tweak.update_data_unit(match &s.unwrap().data_units {
-                    Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "{} units {} page_in_section {} ({}+{})",
-                                "missing data unit",
-                                (*units).len(),
-                                page_in_section,
-                                page_start,
-                                page_count
-                            ),
-                        )
-                    })?,
-                    None => page_in_section as u32,
-                });
-                decrypt_page_xts(
-                    &mut page,
-                    *tweak,
-                    tweak_cipher.as_ref().unwrap(),
-                    data_cipher.as_ref().unwrap(),
-                );
+                // tweak.update_data_unit(match &s.unwrap().data_units {
+                //     Some(units) => *units.get(page_in_section as usize).ok_or_else(|| {
+                //         io::Error::new(
+                //             io::ErrorKind::InvalidInput,
+                //             format!(
+                //                 "{} units {} page_in_section {} ({}+{})",
+                //                 "missing data unit",
+                //                 (*units).len(),
+                //                 page_in_section,
+                //                 page_start,
+                //                 page_count
+                //             ),
+                //         )
+                //     })?,
+                //     None => page_in_section as u32,
+                // });
+                // decrypt_page_xts(
+                //     &mut page,
+                //     *tweak,
+                //     tweak_cipher.as_ref().unwrap(),
+                //     data_cipher.as_ref().unwrap(),
+                // );
+                todo!("Tweak updating not implemented");
                 to_write
             } else if sfile.keep_encrypted {
                 // Decryption needs full 4k blocks

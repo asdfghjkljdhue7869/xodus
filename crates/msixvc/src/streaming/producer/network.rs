@@ -5,7 +5,7 @@ use crate::models::streaming::{ProducerResult, ProducerTask};
 /// Pipeline producer from network source
 #[derive(Clone)]
 pub struct NetworkProducer {
-    url: String,
+    urls: Vec<String>,
     client: reqwest::Client,
 
     pub(super) cancellation_token: tokio_util::sync::CancellationToken,
@@ -19,7 +19,7 @@ pub struct NetworkProducer {
 impl NetworkProducer {
     pub fn new(
         client: reqwest::Client,
-        url: String,
+        urls: Vec<String>,
 
         cancellation_token: tokio_util::sync::CancellationToken,
         task_pool: flume::Receiver<ProducerTask>,
@@ -28,7 +28,7 @@ impl NetworkProducer {
         result_pool: flume::Sender<ProducerResult>,
     ) -> Self {
         Self {
-            url,
+            urls,
             client,
             cancellation_token,
             task_pool,
@@ -36,6 +36,16 @@ impl NetworkProducer {
             memory_pool,
             result_pool,
         }
+    }
+
+    pub async fn len(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let response = self.client.head(self.urls.first().unwrap()).send().await?;
+        let value = response
+            .headers()
+            .get("Content-Length")
+            .ok_or("No Content-Length header".to_string())
+            .map(|h| h.to_str().unwrap().parse().unwrap())?;
+        Ok(value)
     }
 
     pub async fn produce(
@@ -51,7 +61,7 @@ impl NetworkProducer {
         log::trace!("Requesting {range_header}");
         let response = self
             .client
-            .get(&self.url)
+            .get(self.urls.first().unwrap())
             .header("Range", range_header)
             .send()
             .await?;

@@ -1,22 +1,11 @@
 use std::time::Duration;
 
-use crate::models::streaming::{ProducerResult, ProducerTask};
+use tokio::sync::mpsc;
+
+use crate::models::streaming::{ProducerResult, ProducerTask, StreamProgress};
 
 pub mod file;
 pub mod network;
-
-// pub trait StreamProducer {
-//     async fn produce(
-//         &mut self,
-//         input: &mut ProducerResult,
-//     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-//     async fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_>;
-//     async fn task(&self) -> Result<ProducerTask, flume::RecvError>;
-//     async fn task_retry(&self) -> Result<ProducerTask, flume::RecvError>;
-//     async fn memory(&self) -> Result<Vec<u8>, flume::RecvError>;
-//     fn send_result(&self, result: ProducerResult) -> Result<(), flume::SendError<ProducerResult>>;
-//     fn supports_scalability(&self) -> bool;
-// }
 
 pub enum StreamProducer {
     Network(network::NetworkProducer),
@@ -33,7 +22,12 @@ impl StreamProducer {
             Self::Network(n) => n.produce(input).await,
         }
     }
-
+    pub async fn len(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::File(f) => f.len().await,
+            Self::Network(n) => n.len().await,
+        }
+    }
     fn is_cancelled(&self) -> bool {
         match self {
             Self::File(f) => f.cancellation_token.is_cancelled(),
@@ -41,12 +35,6 @@ impl StreamProducer {
         }
     }
 
-    async fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
-        match self {
-            Self::File(f) => f.cancellation_token.cancelled(),
-            Self::Network(n) => n.cancellation_token.cancelled(),
-        }
-    }
     fn task(&self) -> Result<ProducerTask, flume::TryRecvError> {
         match self {
             Self::File(f) => f.task_pool.try_recv(),
@@ -76,10 +64,13 @@ impl StreamProducer {
 pub async fn run_producer_loop(
     mut producer: StreamProducer,
     retry_tx: flume::Sender<ProducerTask>,
+    progress_tx: mpsc::Sender<StreamProgress>,
 ) {
+    let mut report_progress = true;
     loop {
         log::trace!("Waiting for task");
 
+        // We have to do a loop like that as async flume channels arent cancel safe
         let task = loop {
             let _ = tokio::time::sleep(Duration::from_millis(5)).await;
             if producer.is_cancelled() {
@@ -106,7 +97,9 @@ pub async fn run_producer_loop(
             ProducerTask::Download {
                 page_number,
                 number_of_pages,
+                skip_progress,
             } => {
+                report_progress = !skip_progress;
                 let Ok(memory) = producer.memory().await else {
                     log::error!(
                         "Producer got RecvError on memory(), unrecoverable error, exiting task"
@@ -127,10 +120,14 @@ pub async fn run_producer_loop(
 
         match produce_result {
             Ok(()) => {
+                let length = result.number_of_pages * 4096;
                 if let Err(err) = producer.send_result(result) {
                     log::error!("Producer got SendError, unercoverable error, exiting task");
                     let _ = retry_tx.send(ProducerTask::Retry(err.0));
                     break;
+                }
+                if report_progress {
+                    let _ = progress_tx.send(StreamProgress::Download(length)).await;
                 }
             }
             Err(err) => {

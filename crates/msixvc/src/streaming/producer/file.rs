@@ -1,3 +1,5 @@
+use std::os::unix::fs::MetadataExt;
+
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::models::streaming::{ProducerResult, ProducerTask};
@@ -5,7 +7,7 @@ use crate::models::streaming::{ProducerResult, ProducerTask};
 /// Pipeline producer from File source
 #[derive(Debug)]
 pub struct FileProducer {
-    file: tokio::io::BufReader<tokio::fs::File>,
+    file: tokio::fs::File,
 
     pub(super) cancellation_token: tokio_util::sync::CancellationToken,
 
@@ -25,13 +27,18 @@ impl FileProducer {
         result_pool: flume::Sender<ProducerResult>,
     ) -> Self {
         Self {
-            file: tokio::io::BufReader::new(file),
+            file,
             cancellation_token,
             task_pool,
             task_retry_pool,
             memory_pool,
             result_pool,
         }
+    }
+
+    pub async fn len(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let metadata = self.file.metadata().await?;
+        Ok(metadata.size())
     }
 
     pub async fn produce(

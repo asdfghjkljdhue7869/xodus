@@ -3,6 +3,7 @@ pub enum ProducerTask {
     Download {
         page_number: u64,
         number_of_pages: u64,
+        skip_progress: bool,
     },
     Retry(ProducerResult),
     End,
@@ -33,25 +34,11 @@ impl From<ProducerResult> for DecryptionResult {
 }
 pub enum StreamSource {
     File(String),
-    Url(String),
-}
-
-impl From<String> for StreamSource {
-    fn from(value: String) -> Self {
-        if value.starts_with("http") {
-            Self::Url(value)
-        } else {
-            Self::File(value)
-        }
-    }
+    Url(Vec<String>),
 }
 
 pub enum StreamProgress {
-    Download(StreamProgressUpdate),
-    Write(StreamProgressUpdate),
-}
-
-pub struct StreamProgressUpdate {
-    pub processed: u64,
-    pub total: u64,
+    Download(u64),
+    Write(u64),
+    Resume(u64),
 }

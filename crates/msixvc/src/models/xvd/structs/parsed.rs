@@ -168,7 +168,7 @@ impl From<raw::XvdHashEntry> for XvdHashEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XvcInfo {
     pub content_id: Uuid,
-    pub xvc_encryption_key_id: HashMap<u16, Uuid>,
+    pub xvc_encryption_key_ids: Vec<Uuid>,
     pub description: [u8; 0x100],
     pub version: u32,
     pub region_count: u32,
@@ -187,12 +187,11 @@ impl From<raw::XvcInfo> for XvcInfo {
     fn from(value: raw::XvcInfo) -> Self {
         Self {
             content_id: Uuid::from_bytes_le(value.content_id),
-            xvc_encryption_key_id: value
-                .xvc_encryption_key_id
+            xvc_encryption_key_ids: value
+                .xvc_encryption_key_ids
                 .into_iter()
-                .enumerate()
-                .map(|(i, uuid)| (i as u16, Uuid::from_bytes_le(uuid)))
-                .filter(|(_i, id)| !id.is_nil())
+                .map(|uuid| Uuid::from_bytes_le(uuid))
+                .filter(|id| !id.is_nil())
                 .collect(),
             description: value.description,
             version: value.version.get(),
