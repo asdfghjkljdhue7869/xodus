@@ -6788,6 +6788,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xodus-game-proxy"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "xodus-service"
 version = "0.1.0"
 dependencies = [
