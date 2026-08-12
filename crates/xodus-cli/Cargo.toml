@@ -7,6 +7,8 @@ default-run = "xodus-cli"
 [dependencies]
 xodus = { path = "../xodus" }
 msixvc = { path = "../msixvc" }
+eappx = { git = "https://github.com/tuxuser/eappx-rs" }
+hex = "0.4.3"
 base64 = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
