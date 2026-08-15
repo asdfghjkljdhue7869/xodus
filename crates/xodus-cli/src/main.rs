@@ -44,12 +44,6 @@ enum SubCommand {
         destination: String,
         #[arg(short, long, help = "Path to a keyfile with content decryption keys")]
         key_file: Option<String>,
-        #[arg(
-            long,
-            default_value_t = false,
-            help = "Include the eappx-rs bundled test key (for testing against its testdata fixtures)"
-        )]
-        key_test: bool,
     },
     Login,
     Logout {
@@ -177,8 +171,7 @@ async fn main() -> ExitCode {
             path,
             destination,
             key_file,
-            key_test,
-        } => commands::extract_eappx::run(path, destination, key_file, key_test).await,
+        } => commands::extract_eappx::run(path, destination, key_file).await,
         SubCommand::Streaming {
             source,
             destination,
