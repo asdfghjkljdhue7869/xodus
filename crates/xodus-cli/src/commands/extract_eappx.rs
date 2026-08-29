@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use eappx::keys::KeyCollection;
 use eappx::EAppxFile;
+use eappx::keys::KeyCollection;
 
 /// Extracts a locally-stored EAppx/EMSIX package.
 ///

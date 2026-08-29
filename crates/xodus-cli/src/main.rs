@@ -38,7 +38,9 @@ enum SubCommand {
         #[arg(short, long)]
         market: Option<String>,
     },
-    #[command(about = "Extract a locally stored EAppx/EMSIX package (research task, see issue #91)")]
+    #[command(
+        about = "Extract a locally stored EAppx/EMSIX package (research task, see issue #91)"
+    )]
     ExtractEappx {
         path: String,
         destination: String,
