@@ -1,2 +1,3 @@
-pub mod structs;
+mod structs;
+
 pub use structs::*;

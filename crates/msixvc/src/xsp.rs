@@ -1,4 +1,5 @@
-use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, BufReader};
+use msixvc_common::parse::BinaryTryParse;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader};
 
 use crate::models::xsp::{XspHeader, XspPatchRecord};
 
@@ -14,13 +15,21 @@ impl XspFile {
     {
         let mut file = BufReader::new(file);
 
-        let header = XspHeader::read(&mut file).await?;
+        let header = {
+            let mut buf = XspHeader::buffer();
+            file.read_exact(&mut buf).await?;
+            XspHeader::try_from_array(&buf)?
+        };
+
         let mut entries = Vec::with_capacity(header.record_count as usize);
         file.seek(std::io::SeekFrom::Start(header.page_size as u64))
             .await?;
 
+        let mut buf = XspPatchRecord::buffer();
+
         for _ in 0..header.record_count {
-            let record = XspPatchRecord::read(&mut file).await?;
+            file.read_exact(&mut buf).await?;
+            let record = XspPatchRecord::try_from_array(&buf)?;
             entries.push(record);
         }
 

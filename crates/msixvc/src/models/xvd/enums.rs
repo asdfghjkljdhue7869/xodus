@@ -1,10 +1,30 @@
+use msixvc_common::parse::byteorder::little_endian::*;
+use msixvc_common::parse::{BinaryParse, BinaryTryParse, BytesReader, EmptyReader};
+
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
+use typenum::U4 as T4;
+
+// These enums are `repr(u8)`, but they implement `BinaryParse` or `BinaryTryParse`
+// for a size of 4 bytes because they are stored as u32 on the wire.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum XvdType {
     Fixed = 0,
     Dynamic = 1,
+}
+
+impl BinaryTryParse for XvdType {
+    type Output = Self;
+    type Size = T4;
+    type Error = <Self as TryFrom<u8>>::Error;
+
+    fn try_parse<'a>(
+        r: BytesReader<'a, Self::Size>,
+    ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
+        let (val, r) = r.read::<U32>();
+        Self::try_from(val as u8).map(|val| (val, r))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
@@ -49,6 +69,19 @@ pub enum XvdContentType {
     ServerAgent = 0x25,
 }
 
+impl BinaryTryParse for XvdContentType {
+    type Output = Self;
+    type Size = T4;
+    type Error = <Self as TryFrom<u8>>::Error;
+
+    fn try_parse<'a>(
+        r: BytesReader<'a, Self::Size>,
+    ) -> Result<(Self::Output, EmptyReader<'a>), Self::Error> {
+        let (val, r) = r.read::<U32>();
+        Self::try_from(val as u8).map(|val| (val, r))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 pub enum XvcRegionId {
@@ -65,5 +98,15 @@ pub enum XvcRegionId {
 impl XvcRegionId {
     pub fn to_le_bytes(self) -> [u8; 4] {
         Into::<u32>::into(self).to_le_bytes()
+    }
+}
+
+impl BinaryParse for XvcRegionId {
+    type Output = Self;
+    type Size = T4;
+
+    fn parse<'a>(r: BytesReader<'a, Self::Size>) -> (Self::Output, EmptyReader<'a>) {
+        let (val, r) = r.read::<U32>();
+        (Self::from(val), r)
     }
 }

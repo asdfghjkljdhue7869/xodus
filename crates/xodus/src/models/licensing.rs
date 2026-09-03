@@ -18,6 +18,22 @@ pub struct LicenseContentRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LicenseTokenRequest {
+    pub parent_product_id: String,
+    pub enforce_sellable_by: bool,
+    pub related_product_ids: Vec<String>,
+    pub custom_developer_string: String,
+    pub beneficiaries: Vec<LicenseUserIdentity>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseTokenResponse {
+    pub license_token: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceContext {
     pub hardware_manufacturer: String,
     pub hardware_type: String,
@@ -43,9 +59,24 @@ pub struct LicenseUserIdentity {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum LicenseContentResponse {
+    Success {
+        license: LicenseContent,
+    },
+    SatisfactionFailure {
+        #[serde(rename = "satisfactionFailure")]
+        satisfaction_failure: SatisfactionFailure,
+    },
+}
+
+/// Returned instead of a license when the account has no entitlement for the
+/// requested content (e.g. not owned, not covered by the account's Game Pass tier).
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LicenseContentResponse {
-    pub license: LicenseContent,
+pub struct SatisfactionFailure {
+    pub code: i64,
+    pub description: String,
 }
 
 #[derive(Debug, Deserialize)]

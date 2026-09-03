@@ -1,7 +1,9 @@
-pub mod constants;
-pub mod enums;
-pub mod flags;
-pub mod structs;
+mod constants;
+mod enums;
+mod flags;
+mod structs;
+
+pub mod layout;
 
 pub use constants::*;
 pub use enums::*;

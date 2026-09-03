@@ -7,8 +7,20 @@ use xal::cvlib::CorrelationVector;
 use crate::licensing::utils;
 use crate::models::devicecredential::License;
 use crate::models::licensing::{
-    DeviceContext, LicenseContentRequest, LicenseContentResponse, LicenseUserIdentity,
+    DeviceContext, LicenseContent, LicenseContentRequest, LicenseContentResponse,
+    LicenseTokenRequest, LicenseTokenResponse, LicenseUserIdentity,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum LicenseContentError {
+    #[error("request error: {0}")]
+    Request(#[from] reqwest::Error),
+
+    /// The account has no entitlement for the requested content (not owned, or
+    /// not covered by the account's current subscription tier).
+    #[error("not entitled to this content: {description}")]
+    NotEntitled { description: String },
+}
 
 // we might need a bump in xal-rs concerning reqwest,
 // that might block us from using the correlationvector extension
@@ -19,7 +31,7 @@ pub async fn get_license_content(
     ticket_reference: String,
     content_id: String,
     market: String,
-) -> reqwest::Result<(LicenseContentResponse, License)> {
+) -> Result<(LicenseContent, License), LicenseContentError> {
     let cv = CorrelationVector::new();
     let response = client
         .post("https://licensing.mp.microsoft.com/v7.0/licenses/content")
@@ -49,8 +61,54 @@ pub async fn get_license_content(
         .await?;
 
     let content_res = response.json::<LicenseContentResponse>().await?;
-    let license = &content_res.license.keys[0].value;
+    let content = match content_res {
+        LicenseContentResponse::Success { license } => license,
+        LicenseContentResponse::SatisfactionFailure {
+            satisfaction_failure,
+        } => {
+            return Err(LicenseContentError::NotEntitled {
+                description: satisfaction_failure.description,
+            });
+        }
+    };
+    let license = &content.keys[0].value;
     let license = BASE64_STANDARD.decode(license).unwrap();
     let license = quick_xml::de::from_str::<License>(&String::from_utf8(license).unwrap()).unwrap();
-    Ok((content_res, license))
+    Ok((content, license))
+}
+
+pub async fn get_license_token(
+    client: &reqwest::Client,
+    device_ms_token: String,
+    user_ms_token: String,
+    ticket_reference: String,
+    parent_product_id: String,
+    products: Vec<String>,
+    custom_developer_string: String,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let response = client
+        .post("https://licensing.mp.microsoft.com/v8.0/licenseToken")
+        .header("from", "XboxLicenseManager")
+        .header("Authorization", device_ms_token)
+        .header(
+            "user-agent",
+            "XboxLm-PC/Microsoft.GamingServices_32.107.4002.0_x64__8wekyb3d8bbwe",
+        )
+        .json(&LicenseTokenRequest {
+            parent_product_id,
+            enforce_sellable_by: true,
+            related_product_ids: products,
+            custom_developer_string,
+            beneficiaries: vec![LicenseUserIdentity {
+                identity_type: "Msa".to_string(),
+                identity_value: user_ms_token,
+                local_ticket_reference: ticket_reference,
+            }],
+        })
+        .send()
+        .await?;
+
+    let token_resp: LicenseTokenResponse = response.json().await?;
+
+    Ok(token_resp.license_token)
 }
